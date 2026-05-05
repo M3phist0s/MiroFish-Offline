@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 def _ensure_utf8_stdout():
     """
     Ensure stdout/stderr use UTF-8 encoding
-    Solves Windows console Chinese character encoding issue
+    Solves Windows console Unicode character encoding issues
     """
     if sys.platform == 'win32':
         # Reconfigure standard output to UTF-8 on Windows
@@ -75,7 +75,7 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     file_handler.setFormatter(detailed_formatter)
 
     # 2. Console handler - concise logs (INFO and above)
-    # Ensure UTF-8 encoding on Windows to avoid Chinese character issues
+    # Ensure UTF-8 encoding on Windows to avoid Unicode character issues.
     _ensure_utf8_stdout()
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
@@ -123,4 +123,3 @@ def error(msg, *args, **kwargs):
 
 def critical(msg, *args, **kwargs):
     logger.critical(msg, *args, **kwargs)
-

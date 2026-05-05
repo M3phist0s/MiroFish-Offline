@@ -730,7 +730,7 @@ const parseInterview = (text) => {
 
         // Format 1: Number. **Name (index=X)**: Reason
         // Example: 1. **Alumni_345 (index=1)**: As a Wuhan Univ alumni...
-        headerMatch = line.match(/^\d+\.\s*\*\*([^*（(]+)(?:[（(]index\s*=?\s*\d+[)）])?\*\*[：:]\s*(.*)/)
+        headerMatch = line.match(/^\d+\.\s*\*\*([^*(]+)(?:\(index\s*=?\s*\d+\))?\*\*:\s*(.*)/)
         if (headerMatch) {
           name = headerMatch[1].trim()
           reasonStart = headerMatch[2]
@@ -739,7 +739,7 @@ const parseInterview = (text) => {
         // Format 2: - Selected Name (index X): Reason
         // Example: - Selected Parent_601 (index 0): As parent group representative...
         if (!headerMatch) {
-          headerMatch = line.match(/^-\s*Selected([^（(]+)(?:[（(]index\s*=?\s*\d+[)）])?[：:]\s*(.*)/)
+          headerMatch = line.match(/^-\s*Selected([^(]+)(?:\(index\s*=?\s*\d+\))?:\s*(.*)/)
           if (headerMatch) {
             name = headerMatch[1].trim()
             reasonStart = headerMatch[2]
@@ -749,7 +749,7 @@ const parseInterview = (text) => {
         // Format 3: - **Name (index X)**: Reason
         // Example: - **Parent_601 (index 0)**: As parent group representative...
         if (!headerMatch) {
-          headerMatch = line.match(/^-\s*\*\*([^*（(]+)(?:[（(]index\s*=?\s*\d+[)）])?\*\*[：:]\s*(.*)/)
+          headerMatch = line.match(/^-\s*\*\*([^*(]+)(?:\(index\s*=?\s*\d+\))?\*\*:\s*(.*)/)
           if (headerMatch) {
             name = headerMatch[1].trim()
             reasonStart = headerMatch[2]
@@ -871,7 +871,7 @@ const parseInterview = (text) => {
         const quotesText = quotesMatch[1]
         // Prefer matching > "text" format
         let quoteMatches = quotesText.match(/> "([^"]+)"/g)
-        // Fallback: match > "text" or > "text" (Chinese quotes)
+        // Fallback: match quote blocks using straight or curly quotes.
         if (!quoteMatches) {
           quoteMatches = quotesText.match(/> [\u201C""]([^\u201D""]+)[\u201D""]/g)
         }
@@ -1286,8 +1286,8 @@ const InterviewDisplay = {
     // Clean quote text - remove leading list numbers to avoid double numbering
     const cleanQuoteText = (text) => {
       if (!text) return ''
-      // Remove leading patterns like "1. ", "2. ", "1、", "（1）", "(1)" etc.
-      return text.replace(/^\s*\d+[\.\、\)）]\s*/, '').trim()
+      // Remove leading patterns like "1. ", "2. ", or "(1)".
+      return text.replace(/^\s*(?:\d+[\.)]\s*|\(\d+\)\s*)/, '').trim()
     }
     
     const activeIndex = ref(0)
@@ -1342,7 +1342,7 @@ const InterviewDisplay = {
       let match
 
       // Prefer to try "Question X:" format
-      const enPattern = /(?:^|[\r\n]+)Question\s+(\d+)[：:]\s*/g
+      const enPattern = /(?:^|[\r\n]+)Question\s+(\d+):\s*/g
       while ((match = enPattern.exec(answerText)) !== null) {
         matches.push({
           num: parseInt(match[1]),
@@ -1366,7 +1366,7 @@ const InterviewDisplay = {
       // If no numbering or only one found, return whole text
       if (matches.length <= 1) {
         const cleaned = answerText
-          .replace(/^Question\s+\d+[：:]\s*/, '')
+          .replace(/^Question\s+\d+:\s*/, '')
           .replace(/^\d+\.\s+/, '')
           .trim()
         return [cleaned || answerText]
@@ -2098,7 +2098,7 @@ const extractFinalContent = (response) => {
   }
 
   // Try to find content after "Final Content:" or similar variants
-  const finalContentMatch = response.match(/(?:Final\s*Content|Final\s*Result)[：:]\s*\n*([\s\S]*)$/i)
+  const finalContentMatch = response.match(/(?:Final\s*Content|Final\s*Result):\s*\n*([\s\S]*)$/i)
   if (finalContentMatch) {
     return finalContentMatch[1].trim()
   }

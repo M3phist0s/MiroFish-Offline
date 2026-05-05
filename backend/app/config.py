@@ -24,7 +24,7 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
     DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
 
-    # JSON configuration - disable ASCII escaping to display Chinese directly (not as \uXXXX)
+    # JSON configuration - preserve Unicode characters without ASCII escaping.
     JSON_AS_ASCII = False
 
     # LLM configuration (unified OpenAI format)

@@ -13,6 +13,16 @@ from openai import OpenAI
 from ..config import Config
 
 
+ENGLISH_OUTPUT_GUARD = (
+    "English-only output policy: all user-visible output must be English. "
+    "Use non-English source material only as context or quoted evidence. "
+    "When generated content includes statuses, logs, labels, reports, chat answers, "
+    "agent responses, summaries, JSON string values, or quoted evidence shown to users, "
+    "translate it to fluent English while preserving the original meaning. "
+    "Do not translate or modify the original uploaded source artifacts."
+)
+
+
 class LLMClient:
     """LLM Client"""
 
@@ -44,6 +54,26 @@ class LLMClient:
         """Check if we're talking to an Ollama server."""
         return '11434' in (self.base_url or '')
 
+    def _guard_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Attach the English-only policy to every system message."""
+        guarded = []
+        has_system = False
+        for message in messages:
+            if message.get("role") == "system":
+                has_system = True
+                content = message.get("content", "")
+                if ENGLISH_OUTPUT_GUARD not in content:
+                    message = {
+                        **message,
+                        "content": f"{ENGLISH_OUTPUT_GUARD}\n\n{content}",
+                    }
+            guarded.append(message)
+
+        if not has_system:
+            guarded.insert(0, {"role": "system", "content": ENGLISH_OUTPUT_GUARD})
+
+        return guarded
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -65,7 +95,7 @@ class LLMClient:
         """
         kwargs = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._guard_messages(messages),
             "temperature": temperature,
             "max_tokens": max_tokens,
         }

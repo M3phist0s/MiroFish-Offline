@@ -21,7 +21,7 @@ def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
 
-    # Configure JSON encoding: ensure Chinese displays directly (not as \uXXXX)
+    # Preserve Unicode characters without JSON escaping.
     # Flask >= 2.3 uses app.json.ensure_ascii, older versions use JSON_AS_ASCII config
     if hasattr(app, 'json') and hasattr(app.json, 'ensure_ascii'):
         app.json.ensure_ascii = False
@@ -89,4 +89,3 @@ def create_app(config_class=Config):
         logger.info("MiroFish-Offline Backend startup complete")
 
     return app
-

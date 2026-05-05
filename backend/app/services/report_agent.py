@@ -586,7 +586,7 @@ Please output the report outline in JSON format as follows:
 }
 
 Note: sections array must have at least 2 and at most 5 elements!
-IMPORTANT: The entire report outline (title, summary, section titles and descriptions) MUST be in English. Never use Chinese or other languages."""
+IMPORTANT: The entire report outline (title, summary, section titles and descriptions) MUST be in English. Never use any non-English language."""
 
 PLAN_USER_PROMPT_TEMPLATE = """\
 [Prediction Scenario Settings]
@@ -652,13 +652,13 @@ Your task is to:
      > "Certain groups will state: original content..."
    - These quotes are core evidence of simulation predictions
 
-3. [Language Consistency - ALWAYS Write in English]
-   - The entire report MUST be written in English, regardless of source material language
-   - Tool-returned content may contain Chinese, mixed Chinese-English, or other languages
-   - When quoting tool-returned non-English content, ALWAYS translate it to fluent English before writing to report
-   - Keep original meaning unchanged during translation, ensure natural expression
-   - This rule applies to both body text and quoted content (> format)
-   - NEVER switch to Chinese or any other language mid-report
+3. [English-Only Output - Must Follow]
+   - The report must be entirely in fluent English, regardless of the language of the simulation requirement or source material
+   - Tool returned content may contain non-English or mixed-language expressions
+   - When quoting tool content, translate quoted text to fluent English before including it in the report
+   - Preserve the original meaning, stance, tone, and evidence value when translating
+   - This rule applies to both regular text and quoted blocks (> format)
+   - Never switch to any other language mid-report
 
 4. [Faithfully Present Prediction Results]
    - Report content must reflect simulation results that represent the future in the simulated world
@@ -1964,14 +1964,14 @@ class ReportManager:
     @classmethod
     def get_console_log(cls, report_id: str, from_line: int = 0) -> Dict[str, Any]:
         """
-        Getconsolelogcontent
+        Get console log content.
         
-        This isReportgenerateduring processconsoleoutputlog（INFO、WARNINGetc），
-        and agent_log.jsonl structured logsdifferent。
+        This returns console output collected during report generation
+        (INFO, WARNING, etc.) and is separate from structured agent_log.jsonl entries.
         
         Args:
             report_id: ReportID
-            from_line: from which rowrowStartRead（for incrementalGet，0 means from the beginningStart）
+            from_line: starting line for incremental reads; 0 means from the beginning
             
         Returns:
             {
