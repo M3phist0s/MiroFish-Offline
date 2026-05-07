@@ -145,6 +145,8 @@ class SimulationRunState:
     process_pid: Optional[int] = None
     agent_concurrency: int = 1
     platform_execution: str = "sequential"
+    agent_model_selection: List[Dict[str, Any]] = field(default_factory=list)
+    agent_model_assignments: List[Dict[str, Any]] = field(default_factory=list)
     
     def add_action(self, action: AgentAction):
         """Add action to recent actions list"""
@@ -187,6 +189,8 @@ class SimulationRunState:
             "process_pid": self.process_pid,
             "agent_concurrency": self.agent_concurrency,
             "platform_execution": self.platform_execution,
+            "agent_model_selection": self.agent_model_selection,
+            "agent_model_assignments": self.agent_model_assignments,
         }
 
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -379,6 +383,8 @@ class SimulationRunner:
             started_at=datetime.now().isoformat(),
             agent_concurrency=agent_concurrency,
             platform_execution=platform_execution,
+            agent_model_selection=config.get("agent_model_selection", []),
+            agent_model_assignments=config.get("agent_model_assignments", []),
         )
         
         cls._save_run_state(state)

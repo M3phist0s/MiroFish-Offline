@@ -76,6 +76,7 @@ import warnings
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
+import pandas as pd
 
 # Global variables: for signal handling
 _shutdown_event = None
@@ -104,9 +105,13 @@ else:
 
 from shared.agent_concurrency import (
     clamp_agent_concurrency,
-    iter_action_batches,
-    iter_chunks,
     platform_execution_mode,
+)
+from shared.agent_models import (
+    iter_model_action_batches,
+    iter_model_agent_batches,
+    model_for_agent,
+    normalize_model_routing,
 )
 
 
@@ -170,10 +175,11 @@ try:
     import oasis
     from oasis import (
         ActionType,
+        AgentGraph,
         LLMAction,
         ManualAction,
-        generate_twitter_agent_graph,
-        generate_reddit_agent_graph
+        SocialAgent,
+        UserInfo,
     )
 except ImportError as e:
     print(f"Error: Missing dependency {e}")
@@ -237,6 +243,7 @@ class ParallelIPCHandler:
         reddit_agent_graph=None,
         agent_concurrency: int = None,
         platform_execution: str = None,
+        agent_model_routing: Optional[Dict[str, Any]] = None,
     ):
         self.simulation_dir = simulation_dir
         self.twitter_env = twitter_env
@@ -245,6 +252,7 @@ class ParallelIPCHandler:
         self.reddit_agent_graph = reddit_agent_graph
         self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
         self.platform_execution = platform_execution_mode(platform_execution)
+        self.agent_model_routing = agent_model_routing or normalize_model_routing({})
         
         self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
         self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
@@ -481,7 +489,7 @@ class ParallelIPCHandler:
                         print(f"  Warning: Unable to get Twitter Agent {agent_id}: {e}")
                 
                 if twitter_actions:
-                    for action_batch in iter_action_batches(twitter_actions, self.agent_concurrency):
+                    for action_batch in iter_model_action_batches(twitter_actions, self.agent_model_routing, self.agent_concurrency):
                         await self.twitter_env.step(action_batch)
                     
                     for interview in twitter_interviews:
@@ -509,7 +517,7 @@ class ParallelIPCHandler:
                         print(f"  Warning: Unable to get Reddit Agent {agent_id}: {e}")
                 
                 if reddit_actions:
-                    for action_batch in iter_action_batches(reddit_actions, self.agent_concurrency):
+                    for action_batch in iter_model_action_batches(reddit_actions, self.agent_model_routing, self.agent_concurrency):
                         await self.reddit_env.step(action_batch)
                     
                     for interview in reddit_interviews:
@@ -1054,6 +1062,98 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
     )
 
 
+def create_model_from_spec(spec: Dict[str, Any], fallback_config: Dict[str, Any]):
+    model_name = spec.get("runtime_model") or fallback_config.get("llm_model") or os.environ.get("LLM_MODEL_NAME", "gpt-4o-mini")
+    base_url = spec.get("base_url") or os.environ.get("LLM_BASE_URL", "")
+    api_key_env = spec.get("api_key_env")
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+    api_key = api_key or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "ollama"
+    if base_url:
+        os.environ["OPENAI_API_BASE_URL"] = base_url
+    os.environ["OPENAI_API_KEY"] = api_key
+    print(f"[Agent model] {spec.get('model_id', model_name)} -> {model_name}, base_url={base_url[:48] if base_url else 'default'}...")
+    return ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI,
+        model_type=model_name,
+    )
+
+
+def create_agent_model_resolver(config: Dict[str, Any], use_boost: bool = False):
+    routing = normalize_model_routing(config)
+    selection = routing.get("selection") or []
+    if not selection:
+        model = create_model(config, use_boost=use_boost)
+        return routing, lambda agent_id: model
+
+    model_cache: Dict[str, Any] = {}
+
+    def resolve(agent_id: int):
+        spec = model_for_agent(agent_id, routing)
+        model_id = spec.get("model_id") or "default"
+        if model_id not in model_cache:
+            configured = routing.get("models_by_id", {}).get(model_id, spec)
+            model_cache[model_id] = create_model_from_spec(configured, config)
+        return model_cache[model_id]
+
+    return routing, resolve
+
+
+async def generate_twitter_agent_graph_with_models(profile_path: str, config: Dict[str, Any]):
+    agent_info = pd.read_csv(profile_path)
+    agent_graph = AgentGraph()
+    routing, resolve_model = create_agent_model_resolver(config, use_boost=False)
+    for agent_id in range(len(agent_info)):
+        profile = {"nodes": [], "edges": [], "other_info": {}}
+        profile["other_info"]["user_profile"] = agent_info["user_char"][agent_id]
+        user_info = UserInfo(
+            name=agent_info["username"][agent_id],
+            description=agent_info["description"][agent_id],
+            profile=profile,
+            recsys_type="twitter",
+        )
+        agent = SocialAgent(
+            agent_id=agent_id,
+            user_info=user_info,
+            model=resolve_model(agent_id),
+            agent_graph=agent_graph,
+            available_actions=TWITTER_ACTIONS,
+        )
+        agent_graph.add_agent(agent)
+    return agent_graph, routing
+
+
+async def generate_reddit_agent_graph_with_models(profile_path: str, config: Dict[str, Any]):
+    with open(profile_path, "r", encoding="utf-8") as file:
+        agent_info = json.load(file)
+    agent_graph = AgentGraph()
+    routing, resolve_model = create_agent_model_resolver(config, use_boost=True)
+
+    async def process_agent(agent_id: int):
+        profile = {"nodes": [], "edges": [], "other_info": {}}
+        profile["other_info"]["user_profile"] = agent_info[agent_id]["persona"]
+        profile["other_info"]["mbti"] = agent_info[agent_id]["mbti"]
+        profile["other_info"]["gender"] = agent_info[agent_id]["gender"]
+        profile["other_info"]["age"] = agent_info[agent_id]["age"]
+        profile["other_info"]["country"] = agent_info[agent_id]["country"]
+        user_info = UserInfo(
+            name=agent_info[agent_id]["username"],
+            description=agent_info[agent_id]["bio"],
+            profile=profile,
+            recsys_type="reddit",
+        )
+        agent = SocialAgent(
+            agent_id=agent_id,
+            user_info=user_info,
+            agent_graph=agent_graph,
+            model=resolve_model(agent_id),
+            available_actions=REDDIT_ACTIONS,
+        )
+        agent_graph.add_agent(agent)
+
+    await asyncio.gather(*(process_agent(i) for i in range(len(agent_info))))
+    return agent_graph, routing
+
+
 def get_active_agents_for_round(
     env,
     config: Dict[str, Any],
@@ -1145,20 +1245,13 @@ async def run_twitter_simulation(
     
     log_info("Initializing...")
     
-    # Twitter use common LLM configuration
-    model = create_model(config, use_boost=False)
-    
     # OASIS Twitter uses CSV format
     profile_path = os.path.join(simulation_dir, "twitter_profiles.csv")
     if not os.path.exists(profile_path):
         log_info(f"Error: Profile file does not exist: {profile_path}")
         return result
     
-    result.agent_graph = await generate_twitter_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=TWITTER_ACTIONS,
-    )
+    result.agent_graph, agent_model_routing = await generate_twitter_agent_graph_with_models(profile_path, config)
     
     # Get Agent real name mapping from config (use entity_name instead of default Agent_X)
     agent_names = get_agent_names_from_config(config)
@@ -1222,7 +1315,7 @@ async def run_twitter_simulation(
                 pass
         
         if initial_actions:
-            for action_batch in iter_action_batches(initial_actions, agent_concurrency):
+            for action_batch in iter_model_action_batches(initial_actions, agent_model_routing, agent_concurrency):
                 await result.env.step(action_batch)
             log_info(f"Published {len(initial_actions)} initial posts")
     
@@ -1271,7 +1364,7 @@ async def run_twitter_simulation(
             continue
         
         actual_actions = []
-        for active_batch in iter_chunks(active_agents, agent_concurrency):
+        for active_batch in iter_model_agent_batches(active_agents, agent_model_routing, agent_concurrency):
             actions = {agent: LLMAction() for _, agent in active_batch}
             await result.env.step(actions)
 
@@ -1343,19 +1436,12 @@ async def run_reddit_simulation(
     
     log_info("Initializing...")
     
-    # Reddit use acceleration LLM configuration(if available，otherwise fallback toCommon configuration）
-    model = create_model(config, use_boost=True)
-    
     profile_path = os.path.join(simulation_dir, "reddit_profiles.json")
     if not os.path.exists(profile_path):
         log_info(f"Error: Profile file does not exist: {profile_path}")
         return result
     
-    result.agent_graph = await generate_reddit_agent_graph(
-        profile_path=profile_path,
-        model=model,
-        available_actions=REDDIT_ACTIONS,
-    )
+    result.agent_graph, agent_model_routing = await generate_reddit_agent_graph_with_models(profile_path, config)
     
     # Get Agent real name mapping from config (use entity_name instead of default Agent_X)
     agent_names = get_agent_names_from_config(config)
@@ -1427,7 +1513,7 @@ async def run_reddit_simulation(
                 pass
         
         if initial_actions:
-            for action_batch in iter_action_batches(initial_actions, agent_concurrency):
+            for action_batch in iter_model_action_batches(initial_actions, agent_model_routing, agent_concurrency):
                 await result.env.step(action_batch)
             log_info(f"Published {len(initial_actions)} initial posts")
     
@@ -1476,7 +1562,7 @@ async def run_reddit_simulation(
             continue
         
         actual_actions = []
-        for active_batch in iter_chunks(active_agents, agent_concurrency):
+        for active_batch in iter_model_agent_batches(active_agents, agent_model_routing, agent_concurrency):
             actions = {agent: LLMAction() for _, agent in active_batch}
             await result.env.step(actions)
 
@@ -1658,6 +1744,7 @@ async def main():
             reddit_agent_graph=reddit_result.agent_graph if reddit_result else None,
             agent_concurrency=agent_concurrency,
             platform_execution=platform_execution,
+            agent_model_routing=normalize_model_routing(config),
         )
         ipc_handler.update_status("alive")
         

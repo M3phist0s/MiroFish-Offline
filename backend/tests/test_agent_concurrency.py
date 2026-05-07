@@ -4,11 +4,17 @@ from shared.agent_concurrency import (
     iter_chunks,
     platform_execution_mode,
 )
+from shared.agent_models import iter_model_action_batches, iter_model_agent_batches, normalize_model_routing
 
 
 def test_agent_concurrency_defaults_to_one(monkeypatch):
     monkeypatch.delenv("MIROFISH_AGENT_CONCURRENCY", raising=False)
     assert clamp_agent_concurrency(None) == 1
+
+
+def test_agent_concurrency_default_max_allows_paid_routes(monkeypatch):
+    monkeypatch.delenv("MIROFISH_AGENT_CONCURRENCY_MAX", raising=False)
+    assert clamp_agent_concurrency(100) == 8
 
 
 def test_agent_concurrency_clamps_to_safe_max(monkeypatch):
@@ -33,3 +39,56 @@ def test_platform_execution_defaults_to_sequential(monkeypatch):
     assert platform_execution_mode(None) == "sequential"
     assert platform_execution_mode("invalid") == "sequential"
     assert platform_execution_mode("parallel") == "parallel"
+
+
+class _Agent:
+    def __init__(self, agent_id):
+        self.social_agent_id = agent_id
+
+
+def test_model_action_batches_respect_per_model_limits():
+    routing = normalize_model_routing(
+        {
+            "agent_model_selection": [
+                {"model_id": "local", "concurrency": 1},
+                {"model_id": "paid", "concurrency": 3},
+            ],
+            "agent_model_assignments": [
+                {"agent_id": 0, "model_id": "local"},
+                {"agent_id": 1, "model_id": "local"},
+                {"agent_id": 2, "model_id": "paid"},
+                {"agent_id": 3, "model_id": "paid"},
+                {"agent_id": 4, "model_id": "paid"},
+                {"agent_id": 5, "model_id": "paid"},
+            ],
+        }
+    )
+    actions = {_Agent(agent_id): f"action-{agent_id}" for agent_id in range(6)}
+
+    batches = list(iter_model_action_batches(actions, routing, 8))
+    sizes = [len(batch) for batch in batches]
+
+    assert sizes == [1, 1, 3, 1]
+
+
+def test_model_agent_batches_respect_per_model_limits():
+    routing = normalize_model_routing(
+        {
+            "agent_model_selection": [
+                {"model_id": "a", "concurrency": 1},
+                {"model_id": "b", "concurrency": 2},
+            ],
+            "agent_model_assignments": [
+                {"agent_id": 0, "model_id": "a"},
+                {"agent_id": 1, "model_id": "a"},
+                {"agent_id": 2, "model_id": "b"},
+                {"agent_id": 3, "model_id": "b"},
+                {"agent_id": 4, "model_id": "b"},
+            ],
+        }
+    )
+    active_agents = [(agent_id, _Agent(agent_id)) for agent_id in range(5)]
+
+    batches = list(iter_model_agent_batches(active_agents, routing, 8))
+
+    assert [len(batch) for batch in batches] == [1, 1, 2, 1]

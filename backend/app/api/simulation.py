@@ -463,6 +463,8 @@ def prepare_simulation():
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
         requested_profile_count = data.get('parallel_profile_count', data.get('agent_concurrency'))
         parallel_profile_count = clamp_profile_concurrency(requested_profile_count)
+        agent_model_selection = data.get('agent_model_selection') or []
+        agent_model_assignments = data.get('agent_model_assignments') or []
         
         # ========== Get GraphStorage（Capture reference before background task starts） ==========
         storage = current_app.extensions.get('neo4j_storage')
@@ -585,6 +587,8 @@ def prepare_simulation():
                     use_llm_for_profiles=use_llm_for_profiles,
                     progress_callback=progress_callback,
                     parallel_profile_count=parallel_profile_count,
+                    agent_model_selection=agent_model_selection,
+                    agent_model_assignments=agent_model_assignments,
                     storage=storage,
                 )
                 
@@ -618,6 +622,8 @@ def prepare_simulation():
                 "message": "Preparation task started，Please via /api/simulation/prepare/status Query progress",
                 "already_prepared": False,
                 "profile_concurrency": parallel_profile_count,
+                "agent_model_selection": agent_model_selection,
+                "agent_model_assignments": agent_model_assignments,
                 "expected_entities_count": state.entities_count,  # Expected number of entities to process
                 "entity_types": state.entity_types  # Entity type list
             }
@@ -1507,6 +1513,8 @@ def start_simulation():
         force = data.get('force', False)  # Optional：Force restart
         agent_concurrency = clamp_agent_concurrency(data.get('agent_concurrency'))
         platform_execution = platform_execution_mode(data.get('platform_execution'))
+        agent_model_selection = data.get('agent_model_selection') or []
+        agent_model_assignments = data.get('agent_model_assignments') or []
 
         # Verify max_rounds Parameters
         if max_rounds is not None:
@@ -1626,6 +1634,8 @@ def start_simulation():
         response_data['force_restarted'] = force_restarted
         response_data['agent_concurrency'] = agent_concurrency
         response_data['platform_execution'] = platform_execution
+        response_data['agent_model_selection'] = agent_model_selection or state.agent_model_selection
+        response_data['agent_model_assignments'] = agent_model_assignments or state.agent_model_assignments
         if enable_graph_memory_update:
             response_data['graph_id'] = graph_id
         

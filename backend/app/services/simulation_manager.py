@@ -62,6 +62,8 @@ class SimulationState:
     # Config generation information
     config_generated: bool = False
     config_reasoning: str = ""
+    agent_model_selection: List[Dict[str, Any]] = field(default_factory=list)
+    agent_model_assignments: List[Dict[str, Any]] = field(default_factory=list)
     
     # Runtime data
     current_round: int = 0
@@ -89,6 +91,8 @@ class SimulationState:
             "entity_types": self.entity_types,
             "config_generated": self.config_generated,
             "config_reasoning": self.config_reasoning,
+            "agent_model_selection": self.agent_model_selection,
+            "agent_model_assignments": self.agent_model_assignments,
             "current_round": self.current_round,
             "twitter_status": self.twitter_status,
             "reddit_status": self.reddit_status,
@@ -108,6 +112,8 @@ class SimulationState:
             "profiles_count": self.profiles_count,
             "entity_types": self.entity_types,
             "config_generated": self.config_generated,
+            "agent_model_selection": self.agent_model_selection,
+            "agent_model_assignments": self.agent_model_assignments,
             "error": self.error,
         }
 
@@ -180,6 +186,8 @@ class SimulationManager:
             entity_types=data.get("entity_types", []),
             config_generated=data.get("config_generated", False),
             config_reasoning=data.get("config_reasoning", ""),
+            agent_model_selection=data.get("agent_model_selection", []),
+            agent_model_assignments=data.get("agent_model_assignments", []),
             current_round=data.get("current_round", 0),
             twitter_status=data.get("twitter_status", "not_started"),
             reddit_status=data.get("reddit_status", "not_started"),
@@ -236,6 +244,8 @@ class SimulationManager:
         use_llm_for_profiles: bool = True,
         progress_callback: Optional[callable] = None,
         parallel_profile_count: int = 3,
+        agent_model_selection: Optional[List[Dict[str, Any]]] = None,
+        agent_model_assignments: Optional[List[Dict[str, Any]]] = None,
         storage: 'GraphStorage' = None,
     ) -> SimulationState:
         """
@@ -266,6 +276,8 @@ class SimulationManager:
         
         try:
             state.status = SimulationStatus.PREPARING
+            state.agent_model_selection = agent_model_selection or []
+            state.agent_model_assignments = agent_model_assignments or []
             self._save_simulation_state(state)
             
             sim_dir = self._get_simulation_dir(simulation_id)
@@ -424,8 +436,11 @@ class SimulationManager:
             
             # Save config files
             config_path = os.path.join(sim_dir, "simulation_config.json")
+            config_payload = sim_params.to_dict()
+            config_payload["agent_model_selection"] = state.agent_model_selection
+            config_payload["agent_model_assignments"] = state.agent_model_assignments
             with open(config_path, 'w', encoding='utf-8') as f:
-                f.write(sim_params.to_json())
+                json.dump(config_payload, f, ensure_ascii=False, indent=2)
             
             state.config_generated = True
             state.config_reasoning = sim_params.generation_reasoning

@@ -46,7 +46,13 @@ else:
     if os.path.exists(_backend_env):
         load_dotenv(_backend_env)
 
-from shared.agent_concurrency import clamp_agent_concurrency, iter_action_batches, iter_chunks
+from shared.agent_concurrency import clamp_agent_concurrency
+from shared.agent_models import (
+    iter_model_action_batches,
+    iter_model_agent_batches,
+    model_for_agent,
+    normalize_model_routing,
+)
 
 
 import re
@@ -123,9 +129,11 @@ try:
     import oasis
     from oasis import (
         ActionType,
+        AgentGraph,
         LLMAction,
         ManualAction,
-        generate_reddit_agent_graph
+        SocialAgent,
+        UserInfo,
     )
 except ImportError as e:
     print(f"Error: Missing dependency {e}")
@@ -148,11 +156,19 @@ class CommandType:
 class IPCHandler:
     """IPC command handler"""
     
-    def __init__(self, simulation_dir: str, env, agent_graph, agent_concurrency: int = None):
+    def __init__(
+        self,
+        simulation_dir: str,
+        env,
+        agent_graph,
+        agent_concurrency: int = None,
+        agent_model_routing: Optional[Dict[str, Any]] = None,
+    ):
         self.simulation_dir = simulation_dir
         self.env = env
         self.agent_graph = agent_graph
         self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
+        self.agent_model_routing = agent_model_routing or normalize_model_routing({})
         self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
         self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
         self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
@@ -279,7 +295,7 @@ class IPCHandler:
                 return False
             
             # Execute batch Interview with bounded fanout
-            for action_batch in iter_action_batches(actions, self.agent_concurrency):
+            for action_batch in iter_model_action_batches(actions, self.agent_model_routing, self.agent_concurrency):
                 await self.env.step(action_batch)
             
             # Get all results
@@ -419,6 +435,7 @@ class RedditSimulationRunner:
         self.simulation_dir = os.path.dirname(config_path)
         self.wait_for_commands = wait_for_commands
         self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
+        self.agent_model_routing = normalize_model_routing(self.config)
         self.env = None
         self.agent_graph = None
         self.ipc_handler = None
@@ -470,6 +487,68 @@ class RedditSimulationRunner:
             model_platform=ModelPlatformType.OPENAI,
             model_type=llm_model,
         )
+
+    def _create_model_from_spec(self, spec: Dict[str, Any]):
+        model_name = spec.get("runtime_model") or self.config.get("llm_model") or os.environ.get("LLM_MODEL_NAME", "gpt-4o-mini")
+        base_url = spec.get("base_url") or os.environ.get("LLM_BASE_URL", "")
+        api_key_env = spec.get("api_key_env")
+        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+        api_key = api_key or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "ollama"
+        if base_url:
+            os.environ["OPENAI_API_BASE_URL"] = base_url
+        os.environ["OPENAI_API_KEY"] = api_key
+        print(f"[Agent model] {spec.get('model_id', model_name)} -> {model_name}, base_url={base_url[:48] if base_url else 'default'}...")
+        return ModelFactory.create(
+            model_platform=ModelPlatformType.OPENAI,
+            model_type=model_name,
+        )
+
+    def _create_agent_model_resolver(self):
+        routing = normalize_model_routing(self.config)
+        selection = routing.get("selection") or []
+        if not selection:
+            model = self._create_model()
+            return routing, lambda agent_id: model
+
+        model_cache: Dict[str, Any] = {}
+
+        def resolve(agent_id: int):
+            spec = model_for_agent(agent_id, routing)
+            model_id = spec.get("model_id") or "default"
+            if model_id not in model_cache:
+                configured = routing.get("models_by_id", {}).get(model_id, spec)
+                model_cache[model_id] = self._create_model_from_spec(configured)
+            return model_cache[model_id]
+
+        return routing, resolve
+
+    async def _generate_agent_graph(self, profile_path: str):
+        with open(profile_path, "r", encoding="utf-8") as file:
+            agent_info = json.load(file)
+        agent_graph = AgentGraph()
+        routing, resolve_model = self._create_agent_model_resolver()
+        for agent_id in range(len(agent_info)):
+            profile = {"nodes": [], "edges": [], "other_info": {}}
+            profile["other_info"]["user_profile"] = agent_info[agent_id]["persona"]
+            profile["other_info"]["mbti"] = agent_info[agent_id]["mbti"]
+            profile["other_info"]["gender"] = agent_info[agent_id]["gender"]
+            profile["other_info"]["age"] = agent_info[agent_id]["age"]
+            profile["other_info"]["country"] = agent_info[agent_id]["country"]
+            user_info = UserInfo(
+                name=agent_info[agent_id]["username"],
+                description=agent_info[agent_id]["bio"],
+                profile=profile,
+                recsys_type="reddit",
+            )
+            agent = SocialAgent(
+                agent_id=agent_id,
+                user_info=user_info,
+                agent_graph=agent_graph,
+                model=resolve_model(agent_id),
+                available_actions=self.AVAILABLE_ACTIONS,
+            )
+            agent_graph.add_agent(agent)
+        return agent_graph, routing
     
     def _get_active_agents_for_round(
         self, 
@@ -558,20 +637,13 @@ class RedditSimulationRunner:
             print(f"  - Maximum rounds limit: {max_rounds}")
         print(f"  - Number of Agents: {len(self.config.get('agent_configs', []))}")
         
-        print("\nInitialize LLM model...")
-        model = self._create_model()
-        
-        print("Load Agent Profile...")
+        print("\nLoad Agent Profile and assign agent models...")
         profile_path = self._get_profile_path()
         if not os.path.exists(profile_path):
             print(f"Error: Profile file does not exist: {profile_path}")
             return
         
-        self.agent_graph = await generate_reddit_agent_graph(
-            profile_path=profile_path,
-            model=model,
-            available_actions=self.AVAILABLE_ACTIONS,
-        )
+        self.agent_graph, self.agent_model_routing = await self._generate_agent_graph(profile_path)
         
         db_path = self._get_db_path()
         if os.path.exists(db_path):
@@ -590,7 +662,13 @@ class RedditSimulationRunner:
         print("Environment initialization complete\n")
         
         # Initialize IPC handler
-        self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph, self.agent_concurrency)
+        self.ipc_handler = IPCHandler(
+            self.simulation_dir,
+            self.env,
+            self.agent_graph,
+            self.agent_concurrency,
+            self.agent_model_routing,
+        )
         self.ipc_handler.update_status("running")
         
         # Execute initial events
@@ -621,7 +699,7 @@ class RedditSimulationRunner:
                     print(f"  Warning: Unable to create for Agent {agent_id}Create initial posts: {e}")
             
             if initial_actions:
-                for action_batch in iter_action_batches(initial_actions, self.agent_concurrency):
+                for action_batch in iter_model_action_batches(initial_actions, self.agent_model_routing, self.agent_concurrency):
                     await self.env.step(action_batch)
                 print(f"  Published {len(initial_actions)} initial posts")
         
@@ -641,7 +719,7 @@ class RedditSimulationRunner:
             if not active_agents:
                 continue
             
-            for active_batch in iter_chunks(active_agents, self.agent_concurrency):
+            for active_batch in iter_model_agent_batches(active_agents, self.agent_model_routing, self.agent_concurrency):
                 actions = {
                     agent: LLMAction()
                     for _, agent in active_batch

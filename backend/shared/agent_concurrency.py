@@ -14,7 +14,7 @@ from typing import Dict, Iterable, Iterator, List, TypeVar
 T = TypeVar("T")
 
 DEFAULT_AGENT_CONCURRENCY = 1
-DEFAULT_AGENT_CONCURRENCY_MAX = 4
+DEFAULT_AGENT_CONCURRENCY_MAX = 8
 DEFAULT_PLATFORM_EXECUTION = "sequential"
 VALID_PLATFORM_EXECUTIONS = {"sequential", "parallel"}
 
