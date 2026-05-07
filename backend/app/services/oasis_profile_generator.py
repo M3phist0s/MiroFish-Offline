@@ -819,6 +819,9 @@ Important:
         """
         import concurrent.futures
         from threading import Lock
+        from shared.agent_concurrency import clamp_profile_concurrency
+
+        parallel_count = clamp_profile_concurrency(parallel_count)
         
         # Set graph_id for knowledge graph search
         if graph_id:
@@ -1137,4 +1140,3 @@ Important:
         """[Deprecated] Please use save_profiles() method"""
         logger.warning("save_profiles_to_json is deprecated, please use save_profiles method")
         self.save_profiles(profiles, file_path, platform)
-

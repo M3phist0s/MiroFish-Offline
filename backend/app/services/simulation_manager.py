@@ -14,6 +14,7 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
+from shared.agent_concurrency import clamp_profile_concurrency
 from .entity_reader import EntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
@@ -343,7 +344,7 @@ class SimulationManager:
                 use_llm=use_llm_for_profiles,
                 progress_callback=profile_progress,
                 graph_id=state.graph_id,  # Pass graph_id for graph retrieval
-                parallel_count=parallel_profile_count,  # Parallel generation count
+                parallel_count=clamp_profile_concurrency(parallel_profile_count),  # Bounded generation count
                 realtime_output_path=realtime_output_path,  # Real-time save path
                 output_platform=realtime_platform  # Output format
             )

@@ -10,6 +10,11 @@ from flask import request, jsonify, send_file, current_app
 from . import simulation_bp
 from ..config import Config
 from ..services.entity_reader import EntityReader
+from shared.agent_concurrency import (
+    clamp_agent_concurrency,
+    clamp_profile_concurrency,
+    platform_execution_mode,
+)
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
@@ -456,7 +461,8 @@ def prepare_simulation():
         
         entity_types_list = data.get('entity_types')
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
-        parallel_profile_count = data.get('parallel_profile_count', 5)
+        requested_profile_count = data.get('parallel_profile_count', data.get('agent_concurrency'))
+        parallel_profile_count = clamp_profile_concurrency(requested_profile_count)
         
         # ========== Get GraphStorage（Capture reference before background task starts） ==========
         storage = current_app.extensions.get('neo4j_storage')
@@ -611,6 +617,7 @@ def prepare_simulation():
                 "status": "preparing",
                 "message": "Preparation task started，Please via /api/simulation/prepare/status Query progress",
                 "already_prepared": False,
+                "profile_concurrency": parallel_profile_count,
                 "expected_entities_count": state.entities_count,  # Expected number of entities to process
                 "entity_types": state.entity_types  # Entity type list
             }
@@ -1498,6 +1505,8 @@ def start_simulation():
         max_rounds = data.get('max_rounds')  # Optional: Maximum simulation rounds
         enable_graph_memory_update = data.get('enable_graph_memory_update', False)  # Optional：IsFalseEnable knowledge graph memory update
         force = data.get('force', False)  # Optional：Force restart
+        agent_concurrency = clamp_agent_concurrency(data.get('agent_concurrency'))
+        platform_execution = platform_execution_mode(data.get('platform_execution'))
 
         # Verify max_rounds Parameters
         if max_rounds is not None:
@@ -1601,7 +1610,9 @@ def start_simulation():
             platform=platform,
             max_rounds=max_rounds,
             enable_graph_memory_update=enable_graph_memory_update,
-            graph_id=graph_id
+            graph_id=graph_id,
+            agent_concurrency=agent_concurrency,
+            platform_execution=platform_execution,
         )
         
         # Update simulation status
@@ -1613,6 +1624,8 @@ def start_simulation():
             response_data['max_rounds_applied'] = max_rounds
         response_data['graph_memory_update_enabled'] = enable_graph_memory_update
         response_data['force_restarted'] = force_restarted
+        response_data['agent_concurrency'] = agent_concurrency
+        response_data['platform_execution'] = platform_execution
         if enable_graph_memory_update:
             response_data['graph_id'] = graph_id
         

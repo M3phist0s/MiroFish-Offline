@@ -46,6 +46,8 @@ else:
     if os.path.exists(_backend_env):
         load_dotenv(_backend_env)
 
+from shared.agent_concurrency import clamp_agent_concurrency, iter_action_batches, iter_chunks
+
 
 import re
 
@@ -146,10 +148,11 @@ class CommandType:
 class IPCHandler:
     """IPC command handler"""
     
-    def __init__(self, simulation_dir: str, env, agent_graph):
+    def __init__(self, simulation_dir: str, env, agent_graph, agent_concurrency: int = None):
         self.simulation_dir = simulation_dir
         self.env = env
         self.agent_graph = agent_graph
+        self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
         self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
         self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
         self.status_file = os.path.join(simulation_dir, ENV_STATUS_FILE)
@@ -275,8 +278,9 @@ class IPCHandler:
                 self.send_response(command_id, "failed", error="No valid Agents")
                 return False
             
-            # Execute batch Interview
-            await self.env.step(actions)
+            # Execute batch Interview with bounded fanout
+            for action_batch in iter_action_batches(actions, self.agent_concurrency):
+                await self.env.step(action_batch)
             
             # Get all results
             results = {}
@@ -395,7 +399,7 @@ class TwitterSimulationRunner:
         ActionType.QUOTE_POST,
     ]
     
-    def __init__(self, config_path: str, wait_for_commands: bool = True):
+    def __init__(self, config_path: str, wait_for_commands: bool = True, agent_concurrency: int = None):
         """
         Initialize simulation runner
         
@@ -407,6 +411,7 @@ class TwitterSimulationRunner:
         self.config = self._load_config()
         self.simulation_dir = os.path.dirname(config_path)
         self.wait_for_commands = wait_for_commands
+        self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
         self.env = None
         self.agent_graph = None
         self.ipc_handler = None
@@ -600,7 +605,7 @@ class TwitterSimulationRunner:
         print("Environment initialization complete\n")
         
         # Initialize IPC handler
-        self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph)
+        self.ipc_handler = IPCHandler(self.simulation_dir, self.env, self.agent_graph, self.agent_concurrency)
         self.ipc_handler.update_status("running")
         
         # Execute initial events
@@ -623,7 +628,8 @@ class TwitterSimulationRunner:
                     print(f"  Warning: Unable to create for Agent {agent_id}Create initial posts: {e}")
             
             if initial_actions:
-                await self.env.step(initial_actions)
+                for action_batch in iter_action_batches(initial_actions, self.agent_concurrency):
+                    await self.env.step(action_batch)
                 print(f"  Published {len(initial_actions)} initial posts")
         
         # Main simulation loop
@@ -645,13 +651,12 @@ class TwitterSimulationRunner:
                 continue
             
             # Build action
-            actions = {
-                agent: LLMAction()
-                for _, agent in active_agents
-            }
-            
-            # Execute action
-            await self.env.step(actions)
+            for active_batch in iter_chunks(active_agents, self.agent_concurrency):
+                actions = {
+                    agent: LLMAction()
+                    for _, agent in active_batch
+                }
+                await self.env.step(actions)
             
             # Print progress
             if (round_num + 1) % 10 == 0 or round_num == 0:
@@ -724,6 +729,12 @@ async def main():
         default=False,
         help='immediately after simulation completionClose environment，do not enterWait mode'
     )
+    parser.add_argument(
+        '--agent-concurrency',
+        type=int,
+        default=None,
+        help='Maximum number of agents sent to OASIS per env.step call'
+    )
     
     args = parser.parse_args()
     
@@ -741,7 +752,8 @@ async def main():
     
     runner = TwitterSimulationRunner(
         config_path=args.config,
-        wait_for_commands=not args.no_wait
+        wait_for_commands=not args.no_wait,
+        agent_concurrency=args.agent_concurrency
     )
     await runner.run(max_rounds=args.max_rounds)
 

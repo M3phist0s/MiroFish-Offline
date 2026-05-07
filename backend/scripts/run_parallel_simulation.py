@@ -102,6 +102,13 @@ else:
         load_dotenv(_backend_env)
         print(f"Loaded environment configuration: {_backend_env}")
 
+from shared.agent_concurrency import (
+    clamp_agent_concurrency,
+    iter_action_batches,
+    iter_chunks,
+    platform_execution_mode,
+)
+
 
 class MaxTokensWarningFilter(logging.Filter):
     """Filter out camel-ai max_tokens warnings (we intentionally don't set max_tokens to let the model decide)"""
@@ -227,13 +234,17 @@ class ParallelIPCHandler:
         twitter_env=None,
         twitter_agent_graph=None,
         reddit_env=None,
-        reddit_agent_graph=None
+        reddit_agent_graph=None,
+        agent_concurrency: int = None,
+        platform_execution: str = None,
     ):
         self.simulation_dir = simulation_dir
         self.twitter_env = twitter_env
         self.twitter_agent_graph = twitter_agent_graph
         self.reddit_env = reddit_env
         self.reddit_agent_graph = reddit_agent_graph
+        self.agent_concurrency = clamp_agent_concurrency(agent_concurrency)
+        self.platform_execution = platform_execution_mode(platform_execution)
         
         self.commands_dir = os.path.join(simulation_dir, IPC_COMMANDS_DIR)
         self.responses_dir = os.path.join(simulation_dir, IPC_RESPONSES_DIR)
@@ -395,8 +406,12 @@ class ParallelIPCHandler:
             tasks.append(self._interview_single_platform(agent_id, prompt, "reddit"))
             platforms_to_interview.append("reddit")
         
-        # Execute in parallel
-        platform_results = await asyncio.gather(*tasks)
+        if self.platform_execution == "parallel":
+            platform_results = await asyncio.gather(*tasks)
+        else:
+            platform_results = []
+            for task in tasks:
+                platform_results.append(await task)
         
         for platform_name, platform_result in zip(platforms_to_interview, platform_results):
             results["platforms"][platform_name] = platform_result
@@ -466,7 +481,8 @@ class ParallelIPCHandler:
                         print(f"  Warning: Unable to get Twitter Agent {agent_id}: {e}")
                 
                 if twitter_actions:
-                    await self.twitter_env.step(twitter_actions)
+                    for action_batch in iter_action_batches(twitter_actions, self.agent_concurrency):
+                        await self.twitter_env.step(action_batch)
                     
                     for interview in twitter_interviews:
                         agent_id = interview.get("agent_id")
@@ -493,7 +509,8 @@ class ParallelIPCHandler:
                         print(f"  Warning: Unable to get Reddit Agent {agent_id}: {e}")
                 
                 if reddit_actions:
-                    await self.reddit_env.step(reddit_actions)
+                    for action_batch in iter_action_batches(reddit_actions, self.agent_concurrency):
+                        await self.reddit_env.step(action_batch)
                     
                     for interview in reddit_interviews:
                         agent_id = interview.get("agent_id")
@@ -1103,7 +1120,8 @@ async def run_twitter_simulation(
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
+    max_rounds: Optional[int] = None,
+    agent_concurrency: int = None,
 ) -> PlatformSimulation:
     """Run Twitter simulation
     
@@ -1118,6 +1136,7 @@ async def run_twitter_simulation(
         PlatformSimulation: Result object containing env and agent_graph
     """
     result = PlatformSimulation()
+    agent_concurrency = clamp_agent_concurrency(agent_concurrency)
     
     def log_info(msg):
         if main_logger:
@@ -1203,7 +1222,8 @@ async def run_twitter_simulation(
                 pass
         
         if initial_actions:
-            await result.env.step(initial_actions)
+            for action_batch in iter_action_batches(initial_actions, agent_concurrency):
+                await result.env.step(action_batch)
             log_info(f"Published {len(initial_actions)} initial posts")
     
     # Log round 0 end
@@ -1250,13 +1270,16 @@ async def run_twitter_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # Get actual executed actions from Database and log
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
+        actual_actions = []
+        for active_batch in iter_chunks(active_agents, agent_concurrency):
+            actions = {agent: LLMAction() for _, agent in active_batch}
+            await result.env.step(actions)
+
+            # Get actual executed actions from Database and log
+            batch_actions, last_rowid = fetch_new_actions_from_db(
+                db_path, last_rowid, agent_names
+            )
+            actual_actions.extend(batch_actions)
         
         round_action_count = 0
         for action_data in actual_actions:
@@ -1295,7 +1318,8 @@ async def run_reddit_simulation(
     simulation_dir: str,
     action_logger: Optional[PlatformActionLogger] = None,
     main_logger: Optional[SimulationLogManager] = None,
-    max_rounds: Optional[int] = None
+    max_rounds: Optional[int] = None,
+    agent_concurrency: int = None,
 ) -> PlatformSimulation:
     """Run Reddit simulation
     
@@ -1310,6 +1334,7 @@ async def run_reddit_simulation(
         PlatformSimulation: Result object containing env and agent_graph
     """
     result = PlatformSimulation()
+    agent_concurrency = clamp_agent_concurrency(agent_concurrency)
     
     def log_info(msg):
         if main_logger:
@@ -1402,7 +1427,8 @@ async def run_reddit_simulation(
                 pass
         
         if initial_actions:
-            await result.env.step(initial_actions)
+            for action_batch in iter_action_batches(initial_actions, agent_concurrency):
+                await result.env.step(action_batch)
             log_info(f"Published {len(initial_actions)} initial posts")
     
     # Log round 0 end
@@ -1449,13 +1475,16 @@ async def run_reddit_simulation(
                 action_logger.log_round_end(round_num + 1, 0)
             continue
         
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # Get actual executed actions from Database and log
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
+        actual_actions = []
+        for active_batch in iter_chunks(active_agents, agent_concurrency):
+            actions = {agent: LLMAction() for _, agent in active_batch}
+            await result.env.step(actions)
+
+            # Get actual executed actions from Database and log
+            batch_actions, last_rowid = fetch_new_actions_from_db(
+                db_path, last_rowid, agent_names
+            )
+            actual_actions.extend(batch_actions)
         
         round_action_count = 0
         for action_data in actual_actions:
@@ -1519,6 +1548,18 @@ async def main():
         default=False,
         help='Close environment immediately after simulation completes, do not enter wait mode'
     )
+    parser.add_argument(
+        '--agent-concurrency',
+        type=int,
+        default=None,
+        help='Maximum number of agents sent to OASIS per env.step call'
+    )
+    parser.add_argument(
+        '--platform-execution',
+        choices=['sequential', 'parallel'],
+        default=None,
+        help='Whether to run Twitter and Reddit sequentially or in parallel'
+    )
     
     args = parser.parse_args()
     
@@ -1533,6 +1574,8 @@ async def main():
     config = load_config(args.config)
     simulation_dir = os.path.dirname(args.config) or "."
     wait_for_commands = not args.no_wait
+    agent_concurrency = clamp_agent_concurrency(args.agent_concurrency)
+    platform_execution = platform_execution_mode(args.platform_execution)
     
     # Initialize logging configuration (disable OASIS logs, clean up old files)
     init_logging_for_simulation(simulation_dir)
@@ -1558,6 +1601,8 @@ async def main():
     log_manager.info(f"  - Total simulation duration: {total_hours}hours")
     log_manager.info(f"  - Time per round: {minutes_per_round}minutes")
     log_manager.info(f"  - Configured total rounds: {config_total_rounds}")
+    log_manager.info(f"  - Agent concurrency: {agent_concurrency}")
+    log_manager.info(f"  - Platform execution: {platform_execution}")
     if args.max_rounds:
         log_manager.info(f"  - Maximum rounds limit: {args.max_rounds}")
         if args.max_rounds < config_total_rounds:
@@ -1577,14 +1622,18 @@ async def main():
     reddit_result: Optional[PlatformSimulation] = None
     
     if args.twitter_only:
-        twitter_result = await run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds)
+        twitter_result = await run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds, agent_concurrency)
     elif args.reddit_only:
-        reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds)
+        reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds, agent_concurrency)
+    elif platform_execution == "sequential":
+        twitter_result = await run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds, agent_concurrency)
+        if not (_shutdown_event and _shutdown_event.is_set()):
+            reddit_result = await run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds, agent_concurrency)
     else:
         # Run in parallel (each platform uses independent logger)
         results = await asyncio.gather(
-            run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds),
-            run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds),
+            run_twitter_simulation(config, simulation_dir, twitter_logger, log_manager, args.max_rounds, agent_concurrency),
+            run_reddit_simulation(config, simulation_dir, reddit_logger, log_manager, args.max_rounds, agent_concurrency),
         )
         twitter_result, reddit_result = results
     
@@ -1606,7 +1655,9 @@ async def main():
             twitter_env=twitter_result.env if twitter_result else None,
             twitter_agent_graph=twitter_result.agent_graph if twitter_result else None,
             reddit_env=reddit_result.env if reddit_result else None,
-            reddit_agent_graph=reddit_result.agent_graph if reddit_result else None
+            reddit_agent_graph=reddit_result.agent_graph if reddit_result else None,
+            agent_concurrency=agent_concurrency,
+            platform_execution=platform_execution,
         )
         ipc_handler.update_status("alive")
         

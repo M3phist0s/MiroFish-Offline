@@ -21,6 +21,7 @@ from queue import Queue
 from ..config import Config
 from ..utils.logger import get_logger
 from .graph_memory_updater import GraphMemoryManager
+from shared.agent_concurrency import clamp_agent_concurrency, platform_execution_mode
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
 logger = get_logger('mirofish.simulation_runner')
@@ -142,6 +143,8 @@ class SimulationRunState:
 
     # Process ID (for stopping)
     process_pid: Optional[int] = None
+    agent_concurrency: int = 1
+    platform_execution: str = "sequential"
     
     def add_action(self, action: AgentAction):
         """Add action to recent actions list"""
@@ -182,6 +185,8 @@ class SimulationRunState:
             "completed_at": self.completed_at,
             "error": self.error,
             "process_pid": self.process_pid,
+            "agent_concurrency": self.agent_concurrency,
+            "platform_execution": self.platform_execution,
         }
 
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -272,6 +277,8 @@ class SimulationRunner:
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
+                agent_concurrency=data.get("agent_concurrency", 1),
+                platform_execution=data.get("platform_execution", "sequential"),
             )
 
             # Load recent actions
@@ -316,7 +323,9 @@ class SimulationRunner:
         max_rounds: int = None,  # Maximum simulation rounds (optional, for truncating long simulations)
         enable_graph_memory_update: bool = False,  # Whether to update activities to the graph
         graph_id: str = None,  # Graph ID (required when enabling graph updates)
-        storage: 'GraphStorage' = None  # GraphStorage instance (required if enable_graph_memory_update)
+        storage: 'GraphStorage' = None,  # GraphStorage instance (required if enable_graph_memory_update)
+        agent_concurrency: int = None,
+        platform_execution: str = None,
     ) -> SimulationRunState:
         """
         Start simulation
@@ -336,6 +345,9 @@ class SimulationRunner:
         if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
             raise ValueError(f"Simulation already running: {simulation_id}")
         
+        agent_concurrency = clamp_agent_concurrency(agent_concurrency)
+        platform_execution = platform_execution_mode(platform_execution)
+
         # Load simulation config
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
@@ -365,6 +377,8 @@ class SimulationRunner:
             total_rounds=total_rounds,
             total_simulation_hours=total_hours,
             started_at=datetime.now().isoformat(),
+            agent_concurrency=agent_concurrency,
+            platform_execution=platform_execution,
         )
         
         cls._save_run_state(state)
@@ -424,6 +438,9 @@ class SimulationRunner:
             # If max_rounds specified, add to command-line arguments
             if max_rounds is not None and max_rounds > 0:
                 cmd.extend(["--max-rounds", str(max_rounds)])
+            cmd.extend(["--agent-concurrency", str(agent_concurrency)])
+            if script_name == "run_parallel_simulation.py":
+                cmd.extend(["--platform-execution", platform_execution])
             
             # Create main log file to avoid stdout/stderr pipe buffer overflow
             main_log_path = os.path.join(sim_dir, "simulation.log")
@@ -434,6 +451,8 @@ class SimulationRunner:
             env = os.environ.copy()
             env['PYTHONUTF8'] = '1'  # Python 3.7+ support, make all open() use UTF-8 by default
             env['PYTHONIOENCODING'] = 'utf-8'  # Ensure stdout/stderr use UTF-8
+            env['MIROFISH_AGENT_CONCURRENCY'] = str(agent_concurrency)
+            env['MIROFISH_PLATFORM_EXECUTION'] = platform_execution
             
             # Set working directory to simulation directory (database files etc. will be generated here)
             # Use start_new_session=True to create new process group, ensuring all child processes can be terminated via os.killpg
@@ -1763,4 +1782,3 @@ class SimulationRunner:
             results = results[:limit]
         
         return results
-
