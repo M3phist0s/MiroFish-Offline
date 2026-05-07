@@ -7,6 +7,23 @@ from shared.agent_concurrency import (
 from shared.agent_models import iter_model_action_batches, iter_model_agent_batches, normalize_model_routing
 
 
+def _simulation_test_client(tmp_path, monkeypatch):
+    from flask import Flask
+
+    from app.api import simulation_bp
+    from app.config import Config
+    from app.services.simulation_manager import SimulationManager
+
+    sim_root = tmp_path / "simulations"
+    sim_root.mkdir()
+    monkeypatch.setattr(Config, "OASIS_SIMULATION_DATA_DIR", str(sim_root))
+    monkeypatch.setattr(SimulationManager, "SIMULATION_DATA_DIR", str(sim_root))
+
+    app = Flask(__name__)
+    app.register_blueprint(simulation_bp, url_prefix="/api/simulation")
+    return app.test_client(), sim_root
+
+
 def test_agent_concurrency_defaults_to_one(monkeypatch):
     monkeypatch.delenv("MIROFISH_AGENT_CONCURRENCY", raising=False)
     assert clamp_agent_concurrency(None) == 1
@@ -92,3 +109,63 @@ def test_model_agent_batches_respect_per_model_limits():
     batches = list(iter_model_agent_batches(active_agents, routing, 8))
 
     assert [len(batch) for batch in batches] == [1, 1, 2, 1]
+
+
+def test_prepare_status_reports_failed_no_entity_task(tmp_path, monkeypatch):
+    from app.models.task import TaskManager
+
+    client, _ = _simulation_test_client(tmp_path, monkeypatch)
+    task_manager = TaskManager()
+    task_id = task_manager.create_task("simulation_prepare")
+    task_manager.complete_task(
+        task_id,
+        {
+            "simulation_id": "sim-empty",
+            "project_id": "proj-empty",
+            "graph_id": "graph-empty",
+            "status": "failed",
+            "entities_count": 0,
+            "profiles_count": 0,
+            "config_generated": False,
+            "error": "No entities matching criteria found, check if graph is correctly constructed",
+        },
+    )
+
+    response = client.post(
+        "/api/simulation/prepare/status",
+        json={"simulation_id": "sim-empty", "task_id": task_id},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["success"] is True
+    assert payload["data"]["status"] == "failed"
+    assert payload["data"]["already_prepared"] is False
+    assert payload["data"]["entities_count"] == 0
+    assert payload["data"]["profiles_count"] == 0
+    assert payload["data"]["config_generated"] is False
+    assert "No entities" in payload["data"]["error"]
+
+
+def test_start_rejects_unprepared_no_entity_simulation(tmp_path, monkeypatch):
+    from app.services.simulation_manager import SimulationManager
+
+    client, _ = _simulation_test_client(tmp_path, monkeypatch)
+    manager = SimulationManager()
+    state = manager.create_simulation("proj-empty", "graph-empty")
+    state.status = type(state.status).FAILED
+    state.error = "No entities matching criteria found, check if graph is correctly constructed"
+    state.entities_count = 0
+    state.profiles_count = 0
+    state.config_generated = False
+    manager._save_simulation_state(state)
+
+    response = client.post(
+        "/api/simulation/start",
+        json={"simulation_id": state.simulation_id, "platform": "parallel"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 400
+    assert payload["success"] is False
+    assert "Simulation not ready" in payload["error"]

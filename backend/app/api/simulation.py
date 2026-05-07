@@ -743,6 +743,27 @@ def get_prepare_status():
         
         task_dict = task.to_dict()
         task_dict["already_prepared"] = False
+        task_result = task_dict.get("result") if isinstance(task_dict.get("result"), dict) else {}
+        result_status = str(task_result.get("status", "")).lower()
+        if result_status == "failed":
+            return jsonify({
+                "success": True,
+                "data": {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "progress": task_dict.get("progress", 100),
+                    "message": task_result.get("error") or task_dict.get("error") or "Preparation failed",
+                    "already_prepared": False,
+                    "simulation_id": task_result.get("simulation_id", simulation_id),
+                    "project_id": task_result.get("project_id"),
+                    "graph_id": task_result.get("graph_id"),
+                    "entities_count": task_result.get("entities_count", 0),
+                    "profiles_count": task_result.get("profiles_count", 0),
+                    "config_generated": task_result.get("config_generated", False),
+                    "error": task_result.get("error") or task_dict.get("error"),
+                    "result": task_result,
+                }
+            })
         
         return jsonify({
             "success": True,
